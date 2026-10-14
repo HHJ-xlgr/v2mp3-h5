@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>视频转音频</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+      background: #f5f6f8;
+      color: #1c1e21;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+    body { padding: 16px; }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #1f6feb;
+      margin: 8px 0 4px;
+    }
+    .subtitle { color: #6b7280; font-size: 13px; margin-bottom: 12px; }
+    .status {
+      font-size: 13px;
+      color: #374151;
+      margin: 8px 0;
+    }
+    .status.loading { color: #1f6feb; }
+    .status.error { color: #ef4444; }
+    .status.success { color: #10b981; }
+    .btn {
+      display: block;
+      width: 100%;
+      background: #1f6feb;
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .btn:disabled { background: #c7d2e0; cursor: not-allowed; }
+    .btn.ghost {
+      background: #fff;
+      color: #1f6feb;
+      border: 1px solid #1f6feb;
+      margin-top: 8px;
+    }
+    .progress {
+      width: 100%;
+      height: 8px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #1f6feb, #60a5fa);
+      width: 0%;
+      transition: width 0.2s ease;
+    }
+    .meta { font-size: 12px; color: #6b7280; margin-top: 4px; }
+    .tip { font-size: 12px; color: #f59e0b; margin-top: 8px; line-height: 1.5; }
+    .hidden { display: none; }
+    .step-list { list-style: none; counter-reset: step; }
+    .step-list li {
+      counter-increment: step;
+      padding: 4px 0;
+      font-size: 14px;
+      color: #374151;
+    }
+    .step-list li::before {
+      content: counter(step) ". ";
+      color: #1f6feb;
+      font-weight: 700;
+    }
+    audio { width: 100%; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="title">提取音频</div>
+  <div class="subtitle">所有处理在您手机本地完成，文件不上传</div>
+
+  <!-- 步骤说明 -->
+  <div class="card" id="introCard">
+    <ol class="step-list">
+      <li>选择本地视频文件（≤30MB）</li>
+      <li>等待本地转码</li>
+      <li>下载或保存 MP3</li>
+    </ol>
+    <p class="tip">首次使用需下载约 25MB 的转码引擎，耐心等待。</p>
+  </div>
+
+  <!-- 引擎加载状态 -->
+  <div class="card" id="engineCard">
+    <div class="status" id="engineStatus">转码引擎未加载</div>
+    <button class="btn" id="loadEngineBtn">加载转码引擎</button>
+    <p class="meta" id="engineMeta"></p>
+  </div>
+
+  <!-- 视频选择 -->
+  <div class="card hidden" id="pickCard">
+    <div class="status">请选择视频文件（≤30MB）</div>
+    <input type="file" id="fileInput" accept="video/*" style="margin-top: 8px;">
+    <p class="meta" id="fileMeta"></p>
+  </div>
+
+  <!-- 转码进度 -->
+  <div class="card hidden" id="processCard">
+    <div class="status" id="processStatus">准备中...</div>
+    <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+    <p class="meta" id="processMeta"></p>
+  </div>
+
+  <!-- 结果 -->
+  <div class="card hidden" id="resultCard">
+    <div class="status success">✓ 转码完成</div>
+    <audio id="audioPlayer" controls></audio>
+    <button class="btn" id="downloadBtn">下载 MP3</button>
+    <button class="btn ghost" id="againBtn">再转一个</button>
+  </div>
+
+  <script>
+    // ============ 配置 ============
+    // CDN 候选地址（优先 unpkg，降级 jsdelivr）
+    const FFMPEG_SDK_URL = [
+      'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js',
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js'
+    ];
+    const FFMPEG_CORE_BASE = [
+      'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd'
+    ];
+    const MAX_SIZE_MB = 30;
+
+    // ============ 状态 ============
+    let ffmpeg = null;
+    let lastResultBlob = null;
+    let lastResultName = 'output.mp3';
+
+    // ============ DOM ============
+    const $ = (id) => document.getElementById(id);
+    const engineCard = $('engineCard');
+    const engineStatus = $('engineStatus');
+    const engineMeta = $('engineMeta');
+    const loadEngineBtn = $('loadEngineBtn');
+    const pickCard = $('pickCard');
+    const fileInput = $('fileInput');
+    const fileMeta = $('fileMeta');
+    const processCard = $('processCard');
+    const processStatus = $('processStatus');
+    const processMeta = $('processMeta');
+    const progressBar = $('progressBar');
+    const resultCard = $('resultCard');
+    const audioPlayer = $('audioPlayer');
+    const downloadBtn = $('downloadBtn');
+    const againBtn = $('againBtn');
+
+    // ============ 工具：按序尝试加载远程脚本 ============
+    async function loadScriptFirstAvailable(urls) {
+      for (const url of urls) {
+        try {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = url;
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('fail ' + url));
+            document.head.appendChild(s);
+          });
+          console.log('[load] OK', url);
+          return url;
+        } catch (e) {
+          console.warn('[load] 失败', url, e.message);
+        }
+      }
+      throw new Error('所有 CDN 均不可用');
+    }
+
+    async function loadFFmpegCoreURLs() {
+      const base = await loadScriptFirstAvailable(FFMPEG_CORE_BASE.map(b => b + '/ffmpeg-core.js'))
+        .then(jsUrl => jsUrl.replace(/ffmpeg-core\.js$/, ''));
+      return {
+        coreURL: base + 'ffmpeg-core.js',
+        wasmURL: base + 'ffmpeg-core.wasm'
+      };
+    }
+
+    // ============ 检测浏览器能力 ============
+    function checkSupport() {
+      const ua = navigator.userAgent;
+      const isWechat = /MicroMessenger/i.test(ua);
+      const isIOS = /iPhone|iPad|iPod/i.test(ua);
+      // iOS 微信内置浏览器 ≤ 16.3 不支持 SharedArrayBuffer
+      // iOS 16.4 起 Safari 支持 SharedArrayBuffer + COOP/COEP
+      if (isIOS && isWechat) {
+        // 不阻塞，但提示
+        return { ok: true, warn: 'iOS 微信浏览器建议升级到 16.4+，否则可能转码失败' };
+      }
+      if (typeof SharedArrayBuffer === 'undefined') {
+        return { ok: false, warn: '您的浏览器不支持 SharedArrayBuffer，无法使用本工具' };
+      }
+      return { ok: true };
+    }
+
+    // ============ 加载引擎 ============
+    loadEngineBtn.addEventListener('click', async () => {
+      const sup = checkSupport();
+      if (!sup.ok) {
+        engineStatus.className = 'status error';
+        engineStatus.textContent = sup.warn;
+        return;
+      }
+      engineStatus.className = 'status loading';
+      engineStatus.textContent = '加载转码引擎中（约 25MB）...';
+      loadEngineBtn.disabled = true;
+      try {
+        await loadScriptFirstAvailable(FFMPEG_SDK_URL);
+        // 此时全局有 FFmpeg 构造函数
+        const { FFmpeg } = window;
+        if (!FFmpeg) throw new Error('SDK 加载后未发现 FFmpeg 全局对象');
+
+        ffmpeg = new FFmpeg();
+        ffmpeg.on('log', ({ message }) => console.log('[ffmpeg]', message));
+        ffmpeg.on('progress', ({ progress }) => {
+          const pct = Math.min(100, Math.max(0, Math.floor(progress * 100)));
+          progressBar.style.width = pct + '%';
+          processStatus.textContent = `转码中... ${pct}%`;
+        });
+
+        const urls = await loadFFmpegCoreURLs();
+        engineMeta.textContent = 'SDK: 0.12.10 | Core: 0.12.6';
+
+        await ffmpeg.load(urls);
+        engineStatus.className = 'status success';
+        engineStatus.textContent = '✓ 转码引擎就绪';
+        // 显示选视频卡片
+        pickCard.classList.remove('hidden');
+        loadEngineBtn.textContent = '引擎已加载';
+      } catch (e) {
+        console.error(e);
+        engineStatus.className = 'status error';
+        engineStatus.textContent = '引擎加载失败：' + (e.message || e);
+        loadEngineBtn.disabled = false;
+      }
+    });
+
+    // ============ 选视频 ============
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const sizeMB = file.size / 1024 / 1024;
+      fileMeta.textContent = `${file.name} · ${sizeMB.toFixed(2)}MB`;
+      if (sizeMB > MAX_SIZE_MB) {
+        fileMeta.textContent += `（超过 ${MAX_SIZE_MB}MB，强烈不建议，可能崩溃）`;
+      }
+      // 进入转码
+      await processVideo(file);
+    });
+
+    // ============ 转码 ============
+    async function processVideo(file) {
+      if (!ffmpeg) {
+        alert('请先加载转码引擎');
+        return;
+      }
+      pickCard.classList.add('hidden');
+      processCard.classList.remove('hidden');
+      resultCard.classList.add('hidden');
+
+      const sizeMB = file.size / 1024 / 1024;
+      if (sizeMB > MAX_SIZE_MB) {
+        if (!confirm(`文件 ${sizeMB.toFixed(1)}MB 超过 30MB 建议上限，可能导致手机崩溃或转码失败。继续？`)) {
+          processCard.classList.add('hidden');
+          pickCard.classList.remove('hidden');
+          return;
+        }
+      }
+
+      try {
+        processStatus.textContent = '读取文件...';
+        progressBar.style.width = '0%';
+        processMeta.textContent = `${file.name} · ${sizeMB.toFixed(2)}MB`;
+
+        const inputName = 'in_' + Date.now() + getExt(file.name);
+        const outputName = 'out_' + Date.now() + '.mp3';
+
+        const arrayBuffer = await file.arrayBuffer();
+        processStatus.textContent = '写入临时内存...';
+        await ffmpeg.writeFile(inputName, new Uint8Array(arrayBuffer));
+
+        processStatus.textContent = '转码中...';
+        // -vn 不要视频流，-b:a 128k MP3 比特率，-ar 44100 采样率
+        // -ac 2 立体声（保留原值；非立体声源自动转立体声）
+        await ffmpeg.exec([
+          '-i', inputName,
+          '-vn',
+          '-c:a', 'libmp3lame',
+          '-b:a', '128k',
+          '-ar', '44100',
+          '-ac', '2',
+          outputName
+        ]);
+
+        processStatus.textContent = '读取结果...';
+        const data = await ffmpeg.readFile(outputName);
+        const blob = new Blob([data.buffer], { type: 'audio/mpeg' });
+        lastResultBlob = blob;
+        lastResultName = (file.name.replace(/\.[^.]+$/, '') || 'output') + '.mp3';
+
+        // 清理 MEMFS（防内存泄漏）
+        await ffmpeg.deleteFile(inputName).catch(() => {});
+        await ffmpeg.deleteFile(outputName).catch(() => {});
+
+        // 显示结果
+        audioPlayer.src = URL.createObjectURL(blob);
+        processCard.classList.add('hidden');
+        resultCard.classList.remove('hidden');
+      } catch (e) {
+        console.error(e);
+        processStatus.className = 'status error';
+        processStatus.textContent = '转码失败：' + (e.message || e);
+      }
+    }
+
+    function getExt(name) {
+      const m = name.match(/\.[a-z0-9]+$/i);
+      return m ? m[0] : '.mp4';
+    }
+
+    // ============ 下载 ============
+    downloadBtn.addEventListener('click', () => {
+      if (!lastResultBlob) return;
+      const url = URL.createObjectURL(lastResultBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = lastResultName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObject(url), 1000);
+    });
+
+    // ============ 再转一个 ============
+    againBtn.addEventListener('click', () => {
+      resultCard.classList.add('hidden');
+      pickCard.classList.remove('hidden');
+      fileInput.value = '';
+    });
+
+    // ============ 进入页面提示 ============
+    (function init() {
+      const sup = checkSupport();
+      if (sup.warn && !sup.ok) {
+        engineStatus.className = 'status error';
+        engineStatus.textContent = sup.warn;
+        loadEngineBtn.disabled = true;
+      } else if (sup.warn) {
+        engineMeta.textContent = sup.warn;
+      }
+    })();
+  </script>
+</body>
+</html>
